@@ -34,7 +34,7 @@
 
 ## 下载
 
-- [稳定版](https://github.com/xiaojiuwo233/BiliFix/releases/tag/b6-0.4.1)（推荐的CI，可能稳定）
+- [稳定版](https://github.com/xiaojiuwo233/BiliFix/releases/tag/b6-0.6.0)（推荐的CI，可能稳定）
 - [CI](https://github.com/xiaojiuwo233/BiliFix/actions?query=branch%3A6.2.6)（包含实时更新的内容，功能最新，可能不稳定）
 
 ## 反馈
