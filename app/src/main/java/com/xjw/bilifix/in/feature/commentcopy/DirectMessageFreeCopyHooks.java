@@ -188,6 +188,17 @@ public final class DirectMessageFreeCopyHooks {
     }
 
     private Method resolveComposeDispatchMethod() throws NoSuchMethodException {
+        if (module.hostVersion().prefersSemanticSymbols()) {
+            Method adaptive = symbolResolver == null
+                    ? null : symbolResolver.resolveComposeImMenuDispatchMethod();
+            if (adaptive != null) {
+                module.info("direct-message Compose dispatcher semantic path: "
+                        + adaptive);
+                return adaptive;
+            }
+            throw new NoSuchMethodException(
+                    "Compose IM dispatcher failed required semantic resolution");
+        }
         Throwable lastFailure = null;
         for (String suffix : COMPOSE_UTILS_FAST_PATHS) {
             try {

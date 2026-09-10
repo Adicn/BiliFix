@@ -210,12 +210,43 @@ public final class ModernStoryEntryHooks {
         });
         module.info("6.4 Pegasus holder click hook installed: method=" + click);
 
-        Class<?> routeHelperClass = module.load(classLoader, "yF0.b");
+        try {
+        Method centralRoute;
+        Method finalRoute;
+        DexSymbolResolver.PegasusRouterSymbols semanticRouter =
+                module.hostVersion().prefersSemanticSymbols() && symbolResolver != null
+                        ? symbolResolver.resolvePegasusRouterSymbols() : null;
+        if (semanticRouter != null) {
+            centralRoute = semanticRouter.centralRoute();
+            finalRoute = semanticRouter.defaultWrapper();
+            module.info("Pegasus central router semantic path active: central="
+                    + centralRoute + " wrapper=" + finalRoute);
+        } else if (module.hostVersion().prefersSemanticSymbols()) {
+            throw new NoSuchMethodException(
+                    "Pegasus router failed required semantic resolution");
+        } else {
+            try {
+                Class<?> routeHelperClass = module.load(classLoader, "yF0.b");
+                centralRoute = module.declaredMethod(routeHelperClass, "q",
+                        Context.class, Uri.class, String.class, String.class, String.class,
+                        Map.class, int.class, boolean.class);
+                finalRoute = module.declaredMethod(routeHelperClass, "r",
+                        Context.class, Uri.class, String.class, String.class, String.class,
+                        LinkedHashMap.class, int.class, String.class, int.class);
+            } catch (Throwable exactSymbolsUnavailable) {
+                DexSymbolResolver.PegasusRouterSymbols symbols = symbolResolver == null
+                        ? null : symbolResolver.resolvePegasusRouterSymbols();
+                if (symbols == null) {
+                    throw exactSymbolsUnavailable;
+                }
+                centralRoute = symbols.centralRoute();
+                finalRoute = symbols.defaultWrapper();
+                module.info("Pegasus central router adaptive fallback active: central="
+                        + centralRoute + " wrapper=" + finalRoute);
+            }
+        }
         Class<?> routeResponseClass = module.load(classLoader,
                 "com.bilibili.lib.blrouter.RouteResponse");
-        Method centralRoute = module.declaredMethod(routeHelperClass, "q",
-                Context.class, Uri.class, String.class, String.class, String.class,
-                Map.class, int.class, boolean.class);
         if (!routeResponseClass.isAssignableFrom(centralRoute.getReturnType())) {
             throw new NoSuchMethodException("unexpected Pegasus route response: "
                     + centralRoute);
@@ -263,9 +294,6 @@ public final class ModernStoryEntryHooks {
         });
         module.info("6.4 Pegasus central router hook installed: method=" + centralRoute);
 
-        Method finalRoute = module.declaredMethod(routeHelperClass, "r",
-                Context.class, Uri.class, String.class, String.class, String.class,
-                LinkedHashMap.class, int.class, String.class, int.class);
         module.deoptimizeFeatureMethod(finalRoute);
         module.addHook("Pegasus final route vertical card", finalRoute, chain -> {
             ensureSettings();
@@ -301,36 +329,51 @@ public final class ModernStoryEntryHooks {
             return chain.proceed(arguments);
         });
         module.info("6.4 Pegasus final router hook installed: method=" + finalRoute);
-        installModern640HolderRouteHook();
+        } catch (Throwable throwable) {
+            module.warn("Pegasus central route layer unavailable; other home-card "
+                    + "layers remain active: " + throwable);
+        }
+        try {
+            installModern640HolderRouteHook();
+        } catch (Throwable throwable) {
+            module.warn("Pegasus holder route layer unavailable; processor/central "
+                    + "layers remain active: " + throwable);
+        }
     }
 
     private void installModern640HolderRouteHook() throws Throwable {
-        Class<?> routeClass;
-        Class<?> holderDataClass;
         Method route;
-        try {
-            routeClass = module.load(classLoader, "WE0.a");
-            holderDataClass = module.load(classLoader, "ME0.a");
-            Class<?> specialSpmidClass = module.load(classLoader,
-                    "com.bilibili.pegasus.ext.router.SpecialSpmidType");
-            route = module.declaredMethod(routeClass, "d",
-                    Context.class, holderDataClass, Uri.class,
-                    String.class, String.class, String.class, String.class,
-                    boolean.class, specialSpmidClass, Map.class);
-        } catch (Throwable exactSymbolsUnavailable) {
-            if (symbolResolver == null) {
-                throw exactSymbolsUnavailable;
+        DexSymbolResolver.PegasusHolderRouteSymbols semanticRoute =
+                module.hostVersion().prefersSemanticSymbols() && symbolResolver != null
+                        ? symbolResolver.resolvePegasusHolderRouteSymbols() : null;
+        if (semanticRoute != null) {
+            route = semanticRoute.route();
+            module.info("Pegasus holder route semantic path active: method=" + route
+                    + " holder=" + semanticRoute.holderClass().getName());
+        } else if (module.hostVersion().prefersSemanticSymbols()) {
+            throw new NoSuchMethodException(
+                    "Pegasus holder route failed required semantic resolution");
+        } else {
+            try {
+                Class<?> routeClass = module.load(classLoader, "WE0.a");
+                Class<?> holderDataClass = module.load(classLoader, "ME0.a");
+                Class<?> specialSpmidClass = module.load(classLoader,
+                        "com.bilibili.pegasus.ext.router.SpecialSpmidType");
+                route = module.declaredMethod(routeClass, "d",
+                        Context.class, holderDataClass, Uri.class,
+                        String.class, String.class, String.class, String.class,
+                        boolean.class, specialSpmidClass, Map.class);
+            } catch (Throwable exactSymbolsUnavailable) {
+                DexSymbolResolver.PegasusHolderRouteSymbols symbols =
+                        symbolResolver == null ? null
+                                : symbolResolver.resolvePegasusHolderRouteSymbols();
+                if (symbols == null) {
+                    throw exactSymbolsUnavailable;
+                }
+                route = symbols.route();
+                module.info("Pegasus holder route adaptive fallback active: method="
+                        + route + " holder=" + symbols.holderClass().getName());
             }
-            DexSymbolResolver.PegasusHolderRouteSymbols symbols =
-                    symbolResolver.resolvePegasusHolderRouteSymbols();
-            if (symbols == null) {
-                throw exactSymbolsUnavailable;
-            }
-            route = symbols.route();
-            routeClass = route.getDeclaringClass();
-            holderDataClass = route.getParameterTypes()[1];
-            module.info("6.4 Pegasus holder route adaptive fallback active: method="
-                    + route + " holder=" + holderDataClass.getName());
         }
         module.deoptimizeFeatureMethod(route);
         module.addHook("WE0 holder final route vertical card", route, chain -> {
@@ -468,16 +511,19 @@ public final class ModernStoryEntryHooks {
 
     private void installPlayerButtonHooks() throws Throwable {
         boolean modern640 = module.hostVersion().isModern640OrNewer();
-        String availabilityMethod = modern640 ? "c0"
+        String availabilityMethod = module.hostVersion().isExact650() ? "Y"
+                : modern640 ? "c0"
                 : module.hostVersion().isModern630OrNewer() ? "C" : "r0";
-        String verticalSwitchMethod = module.hostVersion().isExact640Patch() ? "p0"
+        String verticalSwitchMethod = module.hostVersion().isExact650() ? "k0"
+                : module.hostVersion().isExact640Patch() ? "p0"
                 : modern640 ? "o0"
                 : module.hostVersion().isModern630OrNewer() ? "P" : "C0";
-        String iconMethod = module.hostVersion().isExact640Patch() ? "B0"
+        String iconMethod = module.hostVersion().isExact650() ? "w0"
+                : module.hostVersion().isExact640Patch() ? "B0"
                 : modern640 ? "A0"
                 : module.hostVersion().isModern630OrNewer() ? "b0" : "N0";
-        boolean requireSemanticResolution = module.hostVersion().isExact640Patch()
-                || !module.hostVersion().isSupportedModernHost();
+        boolean requireSemanticResolution =
+                module.hostVersion().prefersSemanticSymbols();
         int installedDelegates = 0;
         for (String className : PLAYER_ACTION_DELEGATES) {
             try {

@@ -95,18 +95,38 @@ final class SettingsDeepLinkHooks {
             Class<?> owner, String[] candidates, Class<?>... parameterTypes)
             throws NoSuchMethodException {
         NoSuchMethodException failure = null;
-        for (String name : candidates) {
-            try {
-                Method method = owner.getDeclaredMethod(name, parameterTypes);
-                method.setAccessible(true);
-                module.debug("resolved versioned method: " + method);
-                return method;
-            } catch (NoSuchMethodException exception) {
-                failure = exception;
+        if (!module.hostVersion().prefersSemanticSymbols()) {
+            for (String name : candidates) {
+                try {
+                    Method method = owner.getDeclaredMethod(name, parameterTypes);
+                    method.setAccessible(true);
+                    module.debug("resolved verified method: " + method);
+                    return method;
+                } catch (NoSuchMethodException exception) {
+                    failure = exception;
+                }
             }
         }
+        Method structural = null;
+        for (Method method : owner.getDeclaredMethods()) {
+            if (!java.util.Arrays.equals(method.getParameterTypes(), parameterTypes)) {
+                continue;
+            }
+            if (structural != null) {
+                throw new NoSuchMethodException("multiple structural methods in "
+                        + owner.getName() + " for "
+                        + java.util.Arrays.toString(parameterTypes));
+            }
+            structural = method;
+        }
+        if (structural != null) {
+            structural.setAccessible(true);
+            module.info("resolved method structurally: " + structural);
+            return structural;
+        }
         throw failure == null
-                ? new NoSuchMethodException(owner.getName())
+                ? new NoSuchMethodException(owner.getName() + " "
+                + java.util.Arrays.toString(parameterTypes))
                 : failure;
     }
 

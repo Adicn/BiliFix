@@ -83,7 +83,7 @@ public final class DexSymbolResolver implements AutoCloseable {
         }
 
         if (hostVersion.isExact626() || hostVersion.isExact630()
-                || hostVersion.isExact640()) {
+                || hostVersion.isExact640() || hostVersion.isExact650()) {
             try {
                 storyGateSymbols = exactStoryGateFallback();
                 saveCachedStoryGate(cacheContext, storyGateSymbols);
@@ -377,6 +377,85 @@ public final class DexSymbolResolver implements AutoCloseable {
             return new PegasusHolderRouteSymbols(match, holderClass);
         } catch (Throwable throwable) {
             module.warn("DexKit Pegasus holder route resolution failed: " + throwable);
+            return null;
+        }
+    }
+
+    /** Resolve the central Pegasus URI router and its Kotlin default wrapper. */
+    public synchronized PegasusRouterSymbols resolvePegasusRouterSymbols() {
+        try {
+            DexKitBridge current = requireBridge();
+            MethodDataList candidates = current.findMethod(FindMethod.create()
+                    .matcher(MethodMatcher.create()
+                            .paramTypes(
+                                    "android.content.Context",
+                                    "android.net.Uri",
+                                    "java.lang.String",
+                                    "java.lang.String",
+                                    "java.lang.String",
+                                    "java.util.Map",
+                                    "int",
+                                    "boolean")
+                            .returnType("com.bilibili.lib.blrouter.RouteResponse")
+                            .usingEqStrings(
+                                    "from", "jumpFrom", "sourceFrom",
+                                    "intentFrom", "extra_jump_from")));
+            Method central = null;
+            for (MethodData candidate : candidates) {
+                Method method = candidate.getMethodInstance(classLoader);
+                if (!Modifier.isStatic(method.getModifiers())) {
+                    continue;
+                }
+                if (central != null && !central.equals(method)) {
+                    module.warn("DexKit Pegasus central router ambiguous: first="
+                            + central + " next=" + method);
+                    return null;
+                }
+                central = method;
+            }
+            if (central == null) {
+                module.warn("DexKit Pegasus central router not found: candidates="
+                        + candidates.size());
+                return null;
+            }
+
+            Method wrapper = null;
+            Class<?> owner = central.getDeclaringClass();
+            for (Method method : owner.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if (!Modifier.isStatic(method.getModifiers())
+                        || method.getReturnType() != void.class
+                        || parameters.length != 9
+                        || parameters[0] != android.content.Context.class
+                        || parameters[1] != android.net.Uri.class
+                        || parameters[2] != String.class
+                        || parameters[3] != String.class
+                        || parameters[4] != String.class
+                        || !java.util.LinkedHashMap.class.isAssignableFrom(parameters[5])
+                        || parameters[6] != int.class
+                        || parameters[7] != String.class
+                        || parameters[8] != int.class) {
+                    continue;
+                }
+                if (wrapper != null) {
+                    module.warn("DexKit Pegasus wrapper ambiguous: first="
+                            + wrapper + " next=" + method);
+                    return null;
+                }
+                wrapper = method;
+            }
+            if (wrapper == null) {
+                module.warn("DexKit Pegasus default wrapper not found in "
+                        + owner.getName());
+                return null;
+            }
+            central.setAccessible(true);
+            wrapper.setAccessible(true);
+            module.info("DexKit Pegasus router resolved: central=" + central
+                    + " wrapper=" + wrapper);
+            return new PegasusRouterSymbols(central, wrapper);
+        } catch (Throwable throwable) {
+            module.warn("DexKit Pegasus router resolution failed: " + throwable);
             return null;
         }
     }
@@ -781,9 +860,6 @@ public final class DexSymbolResolver implements AutoCloseable {
                 continue;
             }
             int score = scoreSimCountryGateClass(invoked.getDeclaredClass());
-            if ("d".equals(invoked.getMethodName())) {
-                score += 3;
-            }
             if (score <= 0) {
                 continue;
             }
@@ -819,9 +895,6 @@ public final class DexSymbolResolver implements AutoCloseable {
                         continue;
                     }
                     int score = classScore + scoreGateCallerEvidence(method);
-                    if ("d".equals(method.getMethodName())) {
-                        score += 3;
-                    }
                     if (score > bestScore) {
                         best = method;
                         bestScore = score;
@@ -939,18 +1012,25 @@ public final class DexSymbolResolver implements AutoCloseable {
                 STORY_HANDLER_CLASS, false, classLoader);
         Method handler = handlerClass.getDeclaredMethod("invokeSuspend", Object.class);
         String gateClassName;
-        if (hostVersion.isExact640()) {
+        String gateMethodName;
+        if (hostVersion.isExact650()) {
+            gateClassName = "Nv1.b";
+            gateMethodName = "e";
+        } else if (hostVersion.isExact640()) {
             gateClassName = "Bv1.b";
+            gateMethodName = "d";
         } else if (hostVersion.isExact630()) {
             gateClassName = "Ht1.b";
+            gateMethodName = "d";
         } else if (hostVersion.isExact626()) {
             gateClassName = "Xt1.b";
+            gateMethodName = "d";
         } else {
             throw new ClassNotFoundException(
                     "no verified story gate fallback for host=" + hostVersion);
         }
         Class<?> gateClass = Class.forName(gateClassName, false, classLoader);
-        Method gate = gateClass.getDeclaredMethod("d");
+        Method gate = gateClass.getDeclaredMethod(gateMethodName);
         validateStorySymbols(handler, gate);
         handler.setAccessible(true);
         gate.setAccessible(true);
@@ -1119,6 +1199,9 @@ public final class DexSymbolResolver implements AutoCloseable {
     }
 
     public record PegasusHolderRouteSymbols(Method route, Class<?> holderClass) {
+    }
+
+    public record PegasusRouterSymbols(Method centralRoute, Method defaultWrapper) {
     }
 
     @FunctionalInterface

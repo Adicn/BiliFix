@@ -28,17 +28,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Restores live entries which still have native renderers in the 6.x host. */
 public final class LiveEntranceHooks {
     private static final long PORTAL_CACHE_MS = 60_000L;
-    private static final String PORTAL_URL =
-            "https://api.bilibili.com/x/polymer/web-dynamic/v1/portal"
-                    + "?up_list_more=1&web_location=333.1365";
+    private static final String PORTAL_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/portal"
+            + "?up_list_more=1&web_location=333.1365";
     private static final String APP_KEY = "dfca71928277209b";
     private static final String APP_SECRET = "b5475a8825547a4fc26c7d518eaaa02e";
 
     private final HookApi module;
     private final ClassLoader classLoader;
     private final DexSymbolResolver symbolResolver;
-    private final android.os.Handler mainHandler =
-            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final AtomicBoolean portalRefreshRunning = new AtomicBoolean(false);
     private volatile List<LiveUser> portalLiveUsers = Collections.emptyList();
     private volatile long portalFetchedAt;
@@ -106,39 +104,50 @@ public final class LiveEntranceHooks {
                 "com.bapis.bilibili.app.dynamic.v2.CardVideoUpList");
         Class<?> modelClass;
         Constructor<?> constructor;
-        try {
-            if (module.hostVersion().isModern640OrNewer()) {
-                modelClass = module.load(classLoader, "J40.Y2");
-            } else if (module.hostVersion().isModern630OrNewer()) {
-                modelClass = module.load(classLoader, "C40.h3");
-            } else {
-                modelClass = module.load(classLoader,
-                        "com.bilibili.bplus.followinglist.model.ModuleVideoUpList");
-            }
-            constructor = modelClass.getConstructor(upListClass, boolean.class);
-        } catch (Throwable exactSymbolsUnavailable) {
-            modelClass = symbolResolver == null
-                    ? null : symbolResolver.resolveFollowingLiveModelClass(upListClass);
-            if (modelClass == null) {
-                throw exactSymbolsUnavailable;
-            }
-            constructor = null;
-            for (Constructor<?> candidate : modelClass.getDeclaredConstructors()) {
-                Class<?>[] parameters = candidate.getParameterTypes();
-                if (parameters.length == 2 && parameters[0] == upListClass
-                        && parameters[1] == boolean.class) {
-                    candidate.setAccessible(true);
-                    constructor = candidate;
-                    break;
-                }
-            }
+        Class<?> semanticModel = module.hostVersion().prefersSemanticSymbols()
+                && symbolResolver != null
+                        ? symbolResolver.resolveFollowingLiveModelClass(upListClass)
+                        : null;
+        if (semanticModel != null) {
+            modelClass = semanticModel;
+            constructor = findFollowingModelConstructor(modelClass, upListClass);
             if (constructor == null) {
                 throw new NoSuchMethodException(
-                        "adaptive following live model constructor missing: "
+                        "semantic following live model constructor missing: "
                                 + modelClass.getName());
             }
-            module.info("following live model adaptive fallback active: class="
+            module.info("following live model semantic path active: class="
                     + modelClass.getName());
+        } else if (module.hostVersion().prefersSemanticSymbols()) {
+            throw new NoSuchMethodException(
+                    "following live model failed required semantic resolution");
+        } else {
+            try {
+                if (module.hostVersion().isModern640OrNewer()) {
+                    modelClass = module.load(classLoader, "J40.Y2");
+                } else if (module.hostVersion().isModern630OrNewer()) {
+                    modelClass = module.load(classLoader, "C40.h3");
+                } else {
+                    modelClass = module.load(classLoader,
+                            "com.bilibili.bplus.followinglist.model.ModuleVideoUpList");
+                }
+                constructor = modelClass.getConstructor(upListClass, boolean.class);
+            } catch (Throwable exactSymbolsUnavailable) {
+                modelClass = symbolResolver == null
+                        ? null
+                        : symbolResolver.resolveFollowingLiveModelClass(upListClass);
+                if (modelClass == null) {
+                    throw exactSymbolsUnavailable;
+                }
+                constructor = findFollowingModelConstructor(modelClass, upListClass);
+                if (constructor == null) {
+                    throw new NoSuchMethodException(
+                            "adaptive following live model constructor missing: "
+                                    + modelClass.getName());
+                }
+                module.info("following live model adaptive fallback active: class="
+                        + modelClass.getName());
+            }
         }
         module.addHook("following live model restore", constructor, chain -> {
             module.ensureFeatureSettings(currentApplication());
@@ -156,6 +165,19 @@ public final class LiveEntranceHooks {
         });
         module.info("following live model restore resolved structurally: constructor="
                 + constructor);
+    }
+
+    private static Constructor<?> findFollowingModelConstructor(
+            Class<?> modelClass, Class<?> upListClass) {
+        for (Constructor<?> candidate : modelClass.getDeclaredConstructors()) {
+            Class<?>[] parameters = candidate.getParameterTypes();
+            if (parameters.length == 2 && parameters[0] == upListClass
+                    && parameters[1] == boolean.class) {
+                candidate.setAccessible(true);
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private Object patchFollowingUpList(Object original) {
@@ -500,7 +522,8 @@ public final class LiveEntranceHooks {
             method.setAccessible(true);
             Object value = method.invoke(null);
             return value instanceof android.content.Context
-                    ? (android.content.Context) value : null;
+                    ? (android.content.Context) value
+                    : null;
         } catch (Throwable ignored) {
             return null;
         }

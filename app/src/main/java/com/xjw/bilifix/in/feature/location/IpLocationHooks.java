@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -19,7 +20,6 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Supplies a compatible request identity needed by the host's existing IP location UI. */
 public final class IpLocationHooks {
     private static final String PROFILE_MOBI_APP = "android";
     private static final String COMMENT_MOBI_APP = "android_hd";
@@ -27,8 +27,7 @@ public final class IpLocationHooks {
     private static final int COMMENT_APP_ID = 5;
     private static final String COMMENT_VERSION_NAME = "2.0.1";
     private static final String COMMENT_CHANNEL = "master";
-    private static final String REPLY_SERVICE =
-            "bilibili.main.community.reply.v1.Reply/";
+    private static final String REPLY_SERVICE = "bilibili.main.community.reply.v1.Reply/";
     private static final String PROFILE_PATH = "/x/v2/space";
 
     private static final Set<String> COMMENT_RPC_READ_METHODS = immutableSet(
@@ -53,8 +52,7 @@ public final class IpLocationHooks {
     private final HookApi module;
     private final ClassLoader classLoader;
     private final ThreadLocal<RequestScope> requestScope = new ThreadLocal<>();
-    private final Map<Object, RequestScope> mossCallScopes =
-            Collections.synchronizedMap(new WeakHashMap<>());
+    private final Map<Object, RequestScope> mossCallScopes = Collections.synchronizedMap(new WeakHashMap<>());
     private final AtomicInteger requestLogCount = new AtomicInteger();
     private final AtomicInteger transportLogCount = new AtomicInteger();
     private final AtomicInteger transportRewriteLogCount = new AtomicInteger();
@@ -79,12 +77,6 @@ public final class IpLocationHooks {
         installGroup("profile header-tag diagnostics", this::installProfileHeaderTagDiagnostics);
     }
 
-    /**
-     * 6.2.6 uses the new Moss/OkHttp stack.  Its metadata is a Kotlin-serialized
-     * KMetadata object and the old okhttp3.a0/if1.a factories no longer exist.
-     * Keep this path separate from the pre-6.x implementation so a missing old
-     * class cannot disable the verified 6.2.6 hooks.
-     */
     public void installModern626() {
         installGroup("6.2.6 final Moss binary identity",
                 this::installModernFinalBinaryIdentity);
@@ -101,34 +93,24 @@ public final class IpLocationHooks {
         installGroup("6.2.6 comment location binding", this::installModernCommentBinding);
     }
 
-    /**
-     * Rewrites the binary headers at the last stable point before Kotlin Moss
-     * stores them on the concrete request. Unlike the constructor hooks, this
-     * point still owns the request descriptor after every coroutine resume, so
-     * it does not depend on a ThreadLocal surviving a dispatcher switch.
-     *
-     * <p>The field numbers below come from the 6.2.6 generated Kotlin
-     * serializers in the host dex:</p>
-     * <ul>
-     *     <li>KMetadata: mobiApp=2, build=4, channel=5</li>
-     *     <li>KDevice: appId=1, build=2, mobiApp=4, channel=7, versionName=12</li>
-     *     <li>KFawkesReq: appkey=1</li>
-     * </ul>
-     */
     private void installModernFinalBinaryIdentity() throws Throwable {
         Class<?> eventClass = module.load(classLoader,
                 "kntr.base.moss.MossInterceptor$e");
         Class<?> requestClass = module.load(classLoader,
                 "kntr.base.moss.ignet.impl.grpc.c");
-        Class<?> descriptorClass = module.hostVersion().isModern640OrNewer()
-                ? module.load(classLoader, "Zq1.g")
-                : module.load(classLoader,
-                        module.hostVersion().isModern630OrNewer() ? "jp1.g" : "zp1.g");
-        Field requestDescriptor = module.declaredField(eventClass, "b");
-        Field serviceName = module.declaredField(descriptorClass, "b");
-        Field methodName = module.declaredField(descriptorClass, "c");
+        Field requestDescriptor = findModernMossDescriptorField(eventClass);
+        Class<?> descriptorClass = requestDescriptor.getType();
+        Field[] descriptorNames = findModernMossDescriptorNameFields(descriptorClass);
+        Field serviceName = descriptorNames[0];
+        Field methodName = descriptorNames[1];
         Method putBinaryHeader = module.declaredMethod(
                 requestClass, "f", String.class, byte[].class);
+
+        module.info("modern final Moss descriptor resolved structurally: requestField="
+                + requestDescriptor.getDeclaringClass().getName() + "."
+                + requestDescriptor.getName() + " descriptor=" + descriptorClass.getName()
+                + " serviceField=" + serviceName.getName()
+                + " methodField=" + methodName.getName());
 
         module.deoptimizeFeatureMethod(putBinaryHeader);
         module.addHook("6.2.6 final Moss binary identity", putBinaryHeader,
@@ -140,11 +122,14 @@ public final class IpLocationHooks {
 
                     Object request = hookChain.getThisObject();
                     Object descriptor = request == null
-                            ? null : requestDescriptor.get(request);
+                            ? null
+                            : requestDescriptor.get(request);
                     String service = descriptor == null
-                            ? "" : String.valueOf(serviceName.get(descriptor));
+                            ? ""
+                            : String.valueOf(serviceName.get(descriptor));
                     String method = descriptor == null
-                            ? "" : String.valueOf(methodName.get(descriptor));
+                            ? ""
+                            : String.valueOf(methodName.get(descriptor));
                     if (!"Reply".equals(service)
                             || !COMMENT_RPC_READ_METHODS.contains(method)) {
                         return hookChain.proceed();
@@ -190,6 +175,88 @@ public final class IpLocationHooks {
                     args[1] = rewrite.bytes;
                     return hookChain.proceed(args);
                 });
+    }
+
+    private static Field findModernMossDescriptorField(Class<?> eventClass)
+            throws NoSuchFieldException {
+        Field match = null;
+        Class<?> current = eventClass;
+        while (current != null && current != Object.class) {
+            for (Field field : current.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                        || !isModernMossDescriptorClass(field.getType())) {
+                    continue;
+                }
+                if (match != null) {
+                    throw new NoSuchFieldException(
+                            "multiple KMethodDescriptor fields in " + eventClass.getName());
+                }
+                match = field;
+            }
+            current = current.getSuperclass();
+        }
+        if (match == null) {
+            throw new NoSuchFieldException(
+                    "KMethodDescriptor field not found in " + eventClass.getName());
+        }
+        match.setAccessible(true);
+        return match;
+    }
+
+    private static boolean isModernMossDescriptorClass(Class<?> type) {
+        if (type == null || type.isPrimitive() || type.isArray()) {
+            return false;
+        }
+        int stringFields = 0;
+        boolean serialization = false;
+        boolean deserialization = false;
+        for (Field field : type.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            String fieldType = field.getType().getName();
+            if (field.getType() == String.class) {
+                stringFields++;
+            } else if ("kotlinx.serialization.SerializationStrategy".equals(fieldType)) {
+                serialization = true;
+            } else if ("kotlinx.serialization.DeserializationStrategy".equals(fieldType)) {
+                deserialization = true;
+            }
+        }
+        return stringFields >= 8 && serialization && deserialization;
+    }
+
+    private static Field[] findModernMossDescriptorNameFields(Class<?> descriptorClass)
+            throws NoSuchFieldException {
+        try {
+            Field service = descriptorClass.getDeclaredField("b");
+            Field method = descriptorClass.getDeclaredField("c");
+            if (service.getType() == String.class && method.getType() == String.class) {
+                service.setAccessible(true);
+                method.setAccessible(true);
+                return new Field[] { service, method };
+            }
+        } catch (NoSuchFieldException ignored) {
+            // Fall through to declaration-order shape matching below.
+        }
+
+        ArrayList<Field> strings = new ArrayList<>();
+        for (Field field : descriptorClass.getDeclaredFields()) {
+            if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                    && field.getType() == String.class) {
+                strings.add(field);
+            }
+        }
+        if (strings.size() < 3) {
+            throw new NoSuchFieldException(
+                    "KMethodDescriptor String fields changed in "
+                            + descriptorClass.getName());
+        }
+        Field service = strings.get(1);
+        Field method = strings.get(2);
+        service.setAccessible(true);
+        method.setAccessible(true);
+        return new Field[] { service, method };
     }
 
     private WireRewrite rewriteModernIdentityHeader(String header, byte[] source)
@@ -239,9 +306,11 @@ public final class IpLocationHooks {
         module.addHook("6.2.6 Kotlin Moss comment RPC", call, hookChain -> {
             Object descriptor = hookChain.getArg(0);
             String service = descriptor == null
-                    ? "" : String.valueOf(serviceName.get(descriptor));
+                    ? ""
+                    : String.valueOf(serviceName.get(descriptor));
             String method = descriptor == null
-                    ? "" : String.valueOf(methodName.get(descriptor));
+                    ? ""
+                    : String.valueOf(methodName.get(descriptor));
             if (!"Reply".equals(service) || !COMMENT_RPC_READ_METHODS.contains(method)) {
                 return hookChain.proceed();
             }
@@ -264,9 +333,11 @@ public final class IpLocationHooks {
         module.addHook("6.2.6 Kotlin Moss concrete engine", engineCall, hookChain -> {
             Object descriptor = hookChain.getArg(1);
             String service = descriptor == null
-                    ? "" : String.valueOf(serviceName.get(descriptor));
+                    ? ""
+                    : String.valueOf(serviceName.get(descriptor));
             String method = descriptor == null
-                    ? "" : String.valueOf(methodName.get(descriptor));
+                    ? ""
+                    : String.valueOf(methodName.get(descriptor));
             if (!"Reply".equals(service) || !COMMENT_RPC_READ_METHODS.contains(method)) {
                 return hookChain.proceed();
             }
@@ -289,9 +360,11 @@ public final class IpLocationHooks {
                 hookChain -> {
                     Object descriptor = hookChain.getArg(1);
                     String service = descriptor == null
-                            ? "" : String.valueOf(serviceName.get(descriptor));
+                            ? ""
+                            : String.valueOf(serviceName.get(descriptor));
                     String method = descriptor == null
-                            ? "" : String.valueOf(methodName.get(descriptor));
+                            ? ""
+                            : String.valueOf(methodName.get(descriptor));
                     if (module.isIpLocationEnabled()) {
                         module.debug("6.2.6 Kotlin Moss common headers invoked: "
                                 + service + "/" + method);
@@ -324,12 +397,15 @@ public final class IpLocationHooks {
                 hookChain -> {
                     Object context = hookChain.getArg(0);
                     Object request = context == null
-                            ? null : module.invoke(currentEvent, context);
+                            ? null
+                            : module.invoke(currentEvent, context);
                     Object descriptor = request == null ? null : grpcRequestMethod.get(request);
                     String service = descriptor == null
-                            ? "" : String.valueOf(serviceName.get(descriptor));
+                            ? ""
+                            : String.valueOf(serviceName.get(descriptor));
                     String method = descriptor == null
-                            ? "" : String.valueOf(methodName.get(descriptor));
+                            ? ""
+                            : String.valueOf(methodName.get(descriptor));
                     if (!"Reply".equals(service)
                             || !COMMENT_RPC_READ_METHODS.contains(method)) {
                         return hookChain.proceed();
@@ -348,22 +424,22 @@ public final class IpLocationHooks {
                 "com.bapis.bilibili.main.community.reply.v1.KReplyMoss");
         Class<?> continuationClass = module.load(classLoader, "fw1.b");
         String[][] readCalls = {
-                {"mainList", "MainList",
-                        "com.bapis.bilibili.main.community.reply.v1.KMainListReq"},
-                {"detailList", "DetailList",
-                        "com.bapis.bilibili.main.community.reply.v1.M"},
-                {"dialogList", "DialogList",
-                        "com.bapis.bilibili.main.community.reply.v1.N"},
-                {"previewList", "PreviewList",
-                        "com.bapis.bilibili.main.community.reply.v1.g0"},
-                {"replyInfo", "ReplyInfo",
-                        "com.bapis.bilibili.main.community.reply.v1.KReplyInfoReq"},
-                {"searchItem", "SearchItem",
-                        "com.bapis.bilibili.main.community.reply.v1.r0"},
-                {"searchItemPreHook", "SearchItemPreHook",
-                        "com.bapis.bilibili.main.community.reply.v1.p0"},
-                {"shareRepliesInfo", "ShareRepliesInfo",
-                        "com.bapis.bilibili.main.community.reply.v1.KShareRepliesInfoReq"}
+                { "mainList", "MainList",
+                        "com.bapis.bilibili.main.community.reply.v1.KMainListReq" },
+                { "detailList", "DetailList",
+                        "com.bapis.bilibili.main.community.reply.v1.M" },
+                { "dialogList", "DialogList",
+                        "com.bapis.bilibili.main.community.reply.v1.N" },
+                { "previewList", "PreviewList",
+                        "com.bapis.bilibili.main.community.reply.v1.g0" },
+                { "replyInfo", "ReplyInfo",
+                        "com.bapis.bilibili.main.community.reply.v1.KReplyInfoReq" },
+                { "searchItem", "SearchItem",
+                        "com.bapis.bilibili.main.community.reply.v1.r0" },
+                { "searchItemPreHook", "SearchItemPreHook",
+                        "com.bapis.bilibili.main.community.reply.v1.p0" },
+                { "shareRepliesInfo", "ShareRepliesInfo",
+                        "com.bapis.bilibili.main.community.reply.v1.KShareRepliesInfoReq" }
         };
         for (String[] readCall : readCalls) {
             String javaMethodName = readCall[0];
@@ -456,13 +532,6 @@ public final class IpLocationHooks {
             return hookChain.proceed(args);
         });
     }
-
-    /**
-     * 6.2.6 routes both Hilo author-space requests and part of the comment REST
-     * traffic through the new DefaultRequestIntercept (lC0.a).  Scope the
-     * exact request before its common parameters are assembled, then replace
-     * only the identity fields for the two read-only endpoints we support.
-     */
     private void installModernRestIdentity() throws Throwable {
         if (!module.hostVersion().isModern640OrNewer()) {
             installPre640ModernRestIdentity();
@@ -526,7 +595,8 @@ public final class IpLocationHooks {
             @SuppressWarnings("unchecked")
             Map<Object, Object> parameters = (Map<Object, Object>) value;
             String mobiApp = scope.kind == ScopeKind.PROFILE_REST
-                    ? PROFILE_MOBI_APP : COMMENT_MOBI_APP;
+                    ? PROFILE_MOBI_APP
+                    : COMMENT_MOBI_APP;
             parameters.put("mobi_app", mobiApp);
             parameters.put("platform", "android");
             parameters.put("appkey", module.invoke(domesticAppKey, null, mobiApp));
@@ -608,8 +678,8 @@ public final class IpLocationHooks {
 
         Class<?> descriptionClass = module.load(classLoader,
                 "com.bilibili.app.comment3.data.model.CommentItem$e$a");
-        java.lang.reflect.Constructor<?> descriptionConstructor =
-                descriptionClass.getConstructor(Long.class, String.class);
+        java.lang.reflect.Constructor<?> descriptionConstructor = descriptionClass.getConstructor(Long.class,
+                String.class);
         module.addHook("6.2.6 comment3 location model", descriptionConstructor,
                 hookChain -> {
                     Object result = hookChain.proceed();
@@ -707,7 +777,8 @@ public final class IpLocationHooks {
             @SuppressWarnings("unchecked")
             Map<Object, Object> parameters = (Map<Object, Object>) value;
             String mobiApp = scope.kind == ScopeKind.PROFILE_REST
-                    ? PROFILE_MOBI_APP : COMMENT_MOBI_APP;
+                    ? PROFILE_MOBI_APP
+                    : COMMENT_MOBI_APP;
             parameters.put("mobi_app", mobiApp);
             parameters.put("appkey", module.invoke(domesticAppKey, null, mobiApp));
             if (scope.kind == ScopeKind.COMMENT_REST) {
@@ -780,9 +851,6 @@ public final class IpLocationHooks {
 
         installMossSubgroup("gRPC final transport",
                 () -> installMossGrpcTransportScopes(descriptorName));
-        // Authoritative rewrite: the factory hooks above sit on tiny static methods that ART
-        // eventually inlines into their callers, silently bypassing them after the app has been
-        // running for a while. Rewriting the assembled header keeps working regardless.
         installMossSubgroup("gRPC final header rewrite",
                 () -> installMossGrpcHeaderRewrites(metadata, device, fawkes));
         installMossOkHttpScopes();
@@ -860,7 +928,8 @@ public final class IpLocationHooks {
         ProtoRewriteResult rewritten = rewrite.rewriter.rewrite((byte[]) current);
         boolean repaired = !rewritten.originalIdentity.equals(rewritten.rewrittenIdentity);
         if (repaired) {
-            // Reaching here means the factory hook did not run for this request, which is the
+            // Reaching here means the factory hook did not run for this request, which is
+            // the
             // long-uptime failure mode this rewrite exists to cover.
             if (shouldSample(transportRepairLogCount.incrementAndGet(), 10, 100)) {
                 module.warn("IP location transport header repaired: header="
@@ -1096,22 +1165,22 @@ public final class IpLocationHooks {
 
         module.addHook("IP location Moss OkHttp " + part + " final headers",
                 intercept, hookChain -> {
-            Object chain = hookChain.getArg(0);
-            Object request = module.invoke(getRequest, chain);
-            String url = String.valueOf(module.invoke(getUrl, request));
-            if (!isCommentReadRpc(url)) {
-                return hookChain.proceed();
-            }
-            module.ensureFeatureSettings(currentApplication());
-            if (!module.isIpLocationEnabled()) {
-                return hookChain.proceed();
-            }
-            Uri uri = Uri.parse(url);
-            String source = "Moss-OkHttp " + uri.getEncodedPath() + " [" + part + "]";
-            logTargetRequest(ScopeKind.COMMENT_RPC, source);
-            logFinalTransport("downgrade-okhttp", source);
-            return withScope(ScopeKind.COMMENT_RPC, source, hookChain::proceed);
-        });
+                    Object chain = hookChain.getArg(0);
+                    Object request = module.invoke(getRequest, chain);
+                    String url = String.valueOf(module.invoke(getUrl, request));
+                    if (!isCommentReadRpc(url)) {
+                        return hookChain.proceed();
+                    }
+                    module.ensureFeatureSettings(currentApplication());
+                    if (!module.isIpLocationEnabled()) {
+                        return hookChain.proceed();
+                    }
+                    Uri uri = Uri.parse(url);
+                    String source = "Moss-OkHttp " + uri.getEncodedPath() + " [" + part + "]";
+                    logTargetRequest(ScopeKind.COMMENT_RPC, source);
+                    logFinalTransport("downgrade-okhttp", source);
+                    return withScope(ScopeKind.COMMENT_RPC, source, hookChain::proceed);
+                });
     }
 
     private void installMainListDiagnostics() throws Throwable {
@@ -1479,7 +1548,10 @@ public final class IpLocationHooks {
         }
     }
 
-    /** Resolved {@code io.grpc.Metadata} accessors used to patch assembled gRPC headers. */
+    /**
+     * Resolved {@code io.grpc.Metadata} accessors used to patch assembled gRPC
+     * headers.
+     */
     private static final class HeaderAccess {
         private final Method get;
         private final Method discard;
@@ -1492,7 +1564,9 @@ public final class IpLocationHooks {
         }
     }
 
-    /** Binds one interceptor header key field to the rewriter that owns its payload. */
+    /**
+     * Binds one interceptor header key field to the rewriter that owns its payload.
+     */
     private static final class HeaderRewrite {
         private final String keyFieldName;
         private final String headerName;
@@ -1549,7 +1623,9 @@ public final class IpLocationHooks {
         }
     }
 
-    /** Minimal protobuf wire editor that preserves every unrelated field verbatim. */
+    /**
+     * Minimal protobuf wire editor that preserves every unrelated field verbatim.
+     */
     private static final class ProtoWire {
         private ProtoWire() {
         }
@@ -1767,17 +1843,21 @@ public final class IpLocationHooks {
             getBuild = module.publicMethod(messageClass, "getBuild");
             getChannel = module.publicMethod(messageClass, "getChannel");
             getAppId = includesDeviceDetails
-                    ? module.publicMethod(messageClass, "getAppId") : null;
+                    ? module.publicMethod(messageClass, "getAppId")
+                    : null;
             getVersionName = includesDeviceDetails
-                    ? module.publicMethod(messageClass, "getVersionName") : null;
+                    ? module.publicMethod(messageClass, "getVersionName")
+                    : null;
             toBuilder = module.publicMethod(messageClass, "toBuilder");
             setMobiApp = module.publicMethod(builderClass, "setMobiApp", String.class);
             setBuild = module.publicMethod(builderClass, "setBuild", int.class);
             setChannel = module.publicMethod(builderClass, "setChannel", String.class);
             setAppId = includesDeviceDetails
-                    ? module.publicMethod(builderClass, "setAppId", int.class) : null;
+                    ? module.publicMethod(builderClass, "setAppId", int.class)
+                    : null;
             setVersionName = includesDeviceDetails
-                    ? module.publicMethod(builderClass, "setVersionName", String.class) : null;
+                    ? module.publicMethod(builderClass, "setVersionName", String.class)
+                    : null;
             build = module.publicMethod(builderClass, "build");
             toByteArray = module.publicMethod(messageClass, "toByteArray");
         }
@@ -1789,9 +1869,11 @@ public final class IpLocationHooks {
             int originalBuild = ((Number) module.invoke(getBuild, message)).intValue();
             String originalChannel = String.valueOf(module.invoke(getChannel, message));
             int originalAppId = includesDeviceDetails
-                    ? ((Number) module.invoke(getAppId, message)).intValue() : 0;
+                    ? ((Number) module.invoke(getAppId, message)).intValue()
+                    : 0;
             String originalVersionName = includesDeviceDetails
-                    ? String.valueOf(module.invoke(getVersionName, message)) : null;
+                    ? String.valueOf(module.invoke(getVersionName, message))
+                    : null;
             String originalIdentity = originalMobiApp + "/" + originalBuild
                     + "/" + originalChannel;
             if (includesDeviceDetails) {

@@ -89,47 +89,70 @@ public final class Modern626FeatureHooks {
         Method copyFrameState;
         Method topRightConverter = null;
         Field topRightConverterInput = null;
-        try {
-            dataClass = module.load(classLoader, "JC1.l");
-            itemClass = module.load(classLoader, "JC1.n");
-            itemConstructor = itemClass.getConstructor(
-                    String.class, String.class, String.class, String.class, String.class,
-                    int.class, int.class, String.class, List.class, int.class, int.class);
-            topRightField = module.declaredField(dataClass, "a");
-            topTabField = module.declaredField(dataClass, "b");
-            bottomTabField = module.declaredField(dataClass, "c");
-            itemUriField = module.declaredField(itemClass, "c");
-            frameStateClass = module.load(classLoader, "DC1.a");
-            Class<?> configClass = module.load(classLoader, "JC1.d");
-            Class<?> uiStateClass = module.load(classLoader, "KC1.e");
-            Class<?> visibleStateClass = module.load(classLoader, "KC1.f");
-            frameTabData = module.declaredField(frameStateClass, "b");
-            copyFrameState = module.declaredMethod(frameStateClass, "a",
-                    frameStateClass, configClass, dataClass, uiStateClass,
-                    visibleStateClass, boolean.class, int.class);
-        } catch (Throwable exactSymbolsUnavailable) {
-            if (symbolResolver == null) {
-                throw exactSymbolsUnavailable;
+        DexSymbolResolver.ModernHomeSymbols semanticHome =
+                module.hostVersion().prefersSemanticSymbols() && symbolResolver != null
+                        ? symbolResolver.resolveModernHomeSymbols() : null;
+        if (semanticHome != null) {
+            dataClass = semanticHome.dataClass();
+            itemClass = semanticHome.itemClass();
+            itemConstructor = semanticHome.itemConstructor();
+            topRightField = semanticHome.topRightField();
+            topTabField = semanticHome.topTabField();
+            bottomTabField = semanticHome.bottomTabField();
+            itemUriField = semanticHome.itemUriField();
+            frameStateClass = semanticHome.frameStateClass();
+            frameTabData = semanticHome.frameTabData();
+            copyFrameState = semanticHome.frameCopy();
+            topRightConverter = semanticHome.topRightConverter();
+            topRightConverterInput = semanticHome.topRightConverterInput();
+            module.info("modern home symbols semantic path active: "
+                    + semanticHome.evidence());
+        } else if (module.hostVersion().prefersSemanticSymbols()) {
+            throw new NoSuchMethodException(
+                    "modern home failed required semantic resolution");
+        } else {
+            try {
+                dataClass = module.load(classLoader, "JC1.l");
+                itemClass = module.load(classLoader, "JC1.n");
+                itemConstructor = itemClass.getConstructor(
+                        String.class, String.class, String.class, String.class, String.class,
+                        int.class, int.class, String.class, List.class, int.class, int.class);
+                topRightField = module.declaredField(dataClass, "a");
+                topTabField = module.declaredField(dataClass, "b");
+                bottomTabField = module.declaredField(dataClass, "c");
+                itemUriField = module.declaredField(itemClass, "c");
+                frameStateClass = module.load(classLoader, "DC1.a");
+                Class<?> configClass = module.load(classLoader, "JC1.d");
+                Class<?> uiStateClass = module.load(classLoader, "KC1.e");
+                Class<?> visibleStateClass = module.load(classLoader, "KC1.f");
+                frameTabData = module.declaredField(frameStateClass, "b");
+                copyFrameState = module.declaredMethod(frameStateClass, "a",
+                        frameStateClass, configClass, dataClass, uiStateClass,
+                        visibleStateClass, boolean.class, int.class);
+            } catch (Throwable exactSymbolsUnavailable) {
+                if (symbolResolver == null) {
+                    throw exactSymbolsUnavailable;
+                }
+                DexSymbolResolver.ModernHomeSymbols symbols =
+                        symbolResolver.resolveModernHomeSymbols();
+                if (symbols == null) {
+                    throw exactSymbolsUnavailable;
+                }
+                dataClass = symbols.dataClass();
+                itemClass = symbols.itemClass();
+                itemConstructor = symbols.itemConstructor();
+                topRightField = symbols.topRightField();
+                topTabField = symbols.topTabField();
+                bottomTabField = symbols.bottomTabField();
+                itemUriField = symbols.itemUriField();
+                frameStateClass = symbols.frameStateClass();
+                frameTabData = symbols.frameTabData();
+                copyFrameState = symbols.frameCopy();
+                topRightConverter = symbols.topRightConverter();
+                topRightConverterInput = symbols.topRightConverterInput();
+                module.info("modern home symbols adaptive fallback active: "
+                        + symbols.evidence());
             }
-            DexSymbolResolver.ModernHomeSymbols symbols =
-                    symbolResolver.resolveModernHomeSymbols();
-            if (symbols == null) {
-                throw exactSymbolsUnavailable;
-            }
-            dataClass = symbols.dataClass();
-            itemClass = symbols.itemClass();
-            itemConstructor = symbols.itemConstructor();
-            topRightField = symbols.topRightField();
-            topTabField = symbols.topTabField();
-            bottomTabField = symbols.bottomTabField();
-            itemUriField = symbols.itemUriField();
-            frameStateClass = symbols.frameStateClass();
-            frameTabData = symbols.frameTabData();
-            copyFrameState = symbols.frameCopy();
-            topRightConverter = symbols.topRightConverter();
-            topRightConverterInput = symbols.topRightConverterInput();
-            module.info("modern home symbols adaptive fallback active: "
-                    + symbols.evidence());
         }
 
         final Class<?> homeDataClass = dataClass;
