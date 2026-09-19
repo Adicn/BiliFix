@@ -27,6 +27,7 @@ import com.xjw.bilifix.in.feature.commenttranslation.CommentTranslationHooks;
 import com.xjw.bilifix.in.feature.compat.CompatFeatureHooks;
 import com.xjw.bilifix.in.feature.emoticon.PaidEmoticonHooks;
 import com.xjw.bilifix.in.feature.location.IpLocationHooks;
+import com.xjw.bilifix.in.feature.network.NetworkOptimizationHooks;
 import com.xjw.bilifix.in.feature.share.SystemShareHooks;
 import com.xjw.bilifix.in.feature.settings.SettingsManager;
 import com.xjw.bilifix.in.feature.subtitle.AiSubtitleHooks;
@@ -92,6 +93,7 @@ public final class BiliFixModule extends XposedModule implements HookApi {
         }
 
         installApplicationSettingsHook(classLoader);
+        new NetworkOptimizationHooks(this, classLoader).install();
         new WebViewThemeHooks(this, classLoader).install();
         new CompatFeatureHooks(this, classLoader).install();
         new PaidEmoticonHooks(this, classLoader).install();
@@ -273,6 +275,11 @@ public final class BiliFixModule extends XposedModule implements HookApi {
     @Override
     public boolean isSystemShareEnabled() {
         return settingsManager.isSystemShareEnabled();
+    }
+
+    @Override
+    public boolean isNetworkOptimizationEnabled() {
+        return settingsManager.isNetworkOptimizationEnabled();
     }
 
     @Override

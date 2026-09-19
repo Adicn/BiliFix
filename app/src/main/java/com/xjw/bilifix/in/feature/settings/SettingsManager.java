@@ -45,6 +45,8 @@ public final class SettingsManager {
             "bilifix_paid_emoticon_fix_enabled";
     static final String KEY_SYSTEM_SHARE_ENABLED =
             "bilifix_system_share_enabled";
+    static final String KEY_NETWORK_OPTIMIZATION_ENABLED =
+            "bilifix_network_optimization_enabled";
     static final String KEY_VERBOSE_LOGGING_ENABLED =
             "bilifix_verbose_logging_enabled";
     static final String KEY_SETTINGS_ENTRY = "bilifix_settings_entry";
@@ -240,6 +242,10 @@ public final class SettingsManager {
         return state.systemShare;
     }
 
+    public boolean isNetworkOptimizationEnabled() {
+        return state.networkOptimization;
+    }
+
     public boolean isVerboseLoggingEnabled() {
         return state.verboseLogging;
     }
@@ -257,6 +263,7 @@ public final class SettingsManager {
         final boolean aiCommentTranslation;
         final boolean paidEmoticonFix;
         final boolean systemShare;
+        final boolean networkOptimization;
         final boolean verboseLogging;
 
         Snapshot(
@@ -271,6 +278,7 @@ public final class SettingsManager {
                 boolean aiCommentTranslation,
                 boolean paidEmoticonFix,
                 boolean systemShare,
+                boolean networkOptimization,
                 boolean verboseLogging) {
             this.articleFix = articleFix;
             this.dynamicArticleFix = dynamicArticleFix;
@@ -283,6 +291,7 @@ public final class SettingsManager {
             this.aiCommentTranslation = aiCommentTranslation;
             this.paidEmoticonFix = paidEmoticonFix;
             this.systemShare = systemShare;
+            this.networkOptimization = networkOptimization;
             this.verboseLogging = verboseLogging;
         }
 
@@ -292,7 +301,8 @@ public final class SettingsManager {
                     DEFAULT_FEATURE_ENABLED, DEFAULT_FEATURE_ENABLED, DEFAULT_FEATURE_ENABLED,
                     DEFAULT_FEATURE_ENABLED, DEFAULT_FEATURE_ENABLED, DEFAULT_FEATURE_ENABLED,
                     DEFAULT_FEATURE_ENABLED,
-                    DEFAULT_FEATURE_ENABLED, DEFAULT_FEATURE_ENABLED);
+                    DEFAULT_FEATURE_ENABLED, DEFAULT_FEATURE_ENABLED,
+                    DEFAULT_FEATURE_ENABLED);
         }
 
         static Snapshot fromPreferences(SharedPreferences preferences) {
@@ -319,6 +329,8 @@ public final class SettingsManager {
                             KEY_PAID_EMOTICON_FIX_ENABLED, DEFAULT_FEATURE_ENABLED),
                     preferences.getBoolean(
                             KEY_SYSTEM_SHARE_ENABLED, DEFAULT_FEATURE_ENABLED),
+                    preferences.getBoolean(
+                            KEY_NETWORK_OPTIMIZATION_ENABLED, DEFAULT_FEATURE_ENABLED),
                     preferences.getBoolean(
                             KEY_VERBOSE_LOGGING_ENABLED, DEFAULT_FEATURE_ENABLED));
         }
@@ -349,6 +361,8 @@ public final class SettingsManager {
                     intent.getBooleanExtra(
                             KEY_SYSTEM_SHARE_ENABLED, fallback.systemShare),
                     intent.getBooleanExtra(
+                            KEY_NETWORK_OPTIMIZATION_ENABLED, fallback.networkOptimization),
+                    intent.getBooleanExtra(
                             KEY_VERBOSE_LOGGING_ENABLED, fallback.verboseLogging));
         }
 
@@ -366,6 +380,7 @@ public final class SettingsManager {
                     .putExtra(KEY_AI_COMMENT_TRANSLATION_ENABLED, aiCommentTranslation)
                     .putExtra(KEY_PAID_EMOTICON_FIX_ENABLED, paidEmoticonFix)
                     .putExtra(KEY_SYSTEM_SHARE_ENABLED, systemShare)
+                    .putExtra(KEY_NETWORK_OPTIMIZATION_ENABLED, networkOptimization)
                     .putExtra(KEY_VERBOSE_LOGGING_ENABLED, verboseLogging);
         }
 
@@ -381,6 +396,7 @@ public final class SettingsManager {
                     && aiCommentTranslation == other.aiCommentTranslation
                     && paidEmoticonFix == other.paidEmoticonFix
                     && systemShare == other.systemShare
+                    && networkOptimization == other.networkOptimization
                     && verboseLogging == other.verboseLogging;
         }
 
@@ -398,6 +414,7 @@ public final class SettingsManager {
                     + " aiCommentTranslation=" + aiCommentTranslation
                     + " paidEmoticonFix=" + paidEmoticonFix
                     + " systemShare=" + systemShare
+                    + " networkOptimization=" + networkOptimization
                     + " verboseLogging=" + verboseLogging;
         }
     }

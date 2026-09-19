@@ -42,6 +42,8 @@ public interface HookApi {
 
     boolean isSystemShareEnabled();
 
+    boolean isNetworkOptimizationEnabled();
+
     boolean isVerboseLoggingEnabled();
 
     boolean deoptimizeFeatureMethod(Method method);
