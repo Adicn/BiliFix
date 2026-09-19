@@ -11,6 +11,7 @@ import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_AI_SUBTITL
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_ARTICLE_FIX_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_DYNAMIC_ARTICLE_FIX_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_IP_LOCATION_ENABLED;
+import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_NETWORK_OPTIMIZATION_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_PAID_EMOTICON_FIX_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_REGION_FIX_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_RELATION_FIX_ENABLED;
@@ -311,6 +312,15 @@ final class SettingsUiHooks {
                                 addPreference, setKey, setTitle, setSummary,
                                 setPersistent, setOrder,
                                 setOnPreferenceChangeListener, setChecked);
+                        addSwitch(enhanceCategory, switchConstructor,
+                                KEY_NETWORK_OPTIMIZATION_ENABLED,
+                                "网络优化",
+                                "使用备用DNS解析B站域名，改善首页启动时无法加载的问题",
+                                settings.isNetworkOptimizationEnabled(), 4,
+                                changeListenerClass, context,
+                                addPreference, setKey, setTitle, setSummary,
+                                setPersistent, setOrder,
+                                setOnPreferenceChangeListener, setChecked);
 
                         Object debugCategory = createCategory(
                                 context, categoryConstructor, categoryTitleLayout,
@@ -357,6 +367,8 @@ final class SettingsUiHooks {
                                 + settings.isAiCommentTranslationEnabled()
                                 + " paidEmoticonFix=" + settings.isPaidEmoticonFixEnabled()
                                 + " systemShare=" + settings.isSystemShareEnabled()
+                                + " networkOptimization="
+                                + settings.isNetworkOptimizationEnabled()
                                 + " verboseLogging=" + settings.isVerboseLoggingEnabled());
                         return null;
                     } catch (Throwable throwable) {
