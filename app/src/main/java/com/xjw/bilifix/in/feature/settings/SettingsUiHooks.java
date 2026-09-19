@@ -314,8 +314,8 @@ final class SettingsUiHooks {
                                 setOnPreferenceChangeListener, setChecked);
                         addSwitch(enhanceCategory, switchConstructor,
                                 KEY_NETWORK_OPTIMIZATION_ENABLED,
-                                "网络优化",
-                                "使用备用DNS解析B站域名，改善首页启动时无法加载的问题",
+                                "首页加载优化",
+                                "使用备用DNS解析B站域名，改善首页启动时无法正常加载的问题",
                                 settings.isNetworkOptimizationEnabled(), 4,
                                 changeListenerClass, context,
                                 addPreference, setKey, setTitle, setSummary,
