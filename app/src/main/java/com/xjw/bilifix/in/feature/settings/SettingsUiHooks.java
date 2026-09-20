@@ -11,6 +11,7 @@ import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_AI_SUBTITL
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_ARTICLE_FIX_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_DYNAMIC_ARTICLE_FIX_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_IP_LOCATION_ENABLED;
+import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_NETWORK_OPTIMIZATION_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_PAID_EMOTICON_FIX_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_REGION_FIX_ENABLED;
 import static com.xjw.bilifix.in.feature.settings.SettingsManager.KEY_RELATION_FIX_ENABLED;
@@ -307,6 +308,15 @@ final class SettingsUiHooks {
                                 "评论AI翻译（实验性）",
                                 "位于长按评论菜单中，移植于国内版新特性，可能会存在问题",
                                 settings.isAiCommentTranslationEnabled(), 3,
+                                changeListenerClass, context,
+                                addPreference, setKey, setTitle, setSummary,
+                                setPersistent, setOrder,
+                                setOnPreferenceChangeListener, setChecked);
+                        addSwitch(enhanceCategory, switchConstructor,
+                                KEY_NETWORK_OPTIMIZATION_ENABLED,
+                                "首页加载优化",
+                                "检测到网络恢复后重新加载首页，改善移动数据切换 Wi-Fi 后首页卡住的问题",
+                                settings.isNetworkOptimizationEnabled(), 4,
                                 changeListenerClass, context,
                                 addPreference, setKey, setTitle, setSummary,
                                 setPersistent, setOrder,
