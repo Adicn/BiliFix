@@ -94,7 +94,7 @@ public final class BiliFixModule extends XposedModule implements HookApi {
 
         installApplicationSettingsHook(classLoader);
         if (mainProcess) {
-            new NetworkOptimizationHooks(this, classLoader).install();
+            new NetworkOptimizationHooks(this).install();
         }
         new WebViewThemeHooks(this, classLoader).install();
         new CompatFeatureHooks(this, classLoader).install();
