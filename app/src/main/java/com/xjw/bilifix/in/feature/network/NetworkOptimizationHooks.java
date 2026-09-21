@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.Application;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -21,8 +22,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @SuppressLint("MissingPermission")
 public final class NetworkOptimizationHooks {
     private static final String MAIN_ACTIVITY_NAME = "tv.danmaku.bili.MainActivityV2";
+    private static final String NETWORK_STATE_PREFERENCES = "bilifix_in_network_state";
+    private static final String KEY_LAST_TRANSPORT = "last_transport";
+    private static final String KEY_LAST_TRANSPORT_AT = "last_transport_at";
     private static final long NETWORK_RECOVERY_DELAY_MS = 750L;
     private static final long STARTUP_RECOVERY_DELAY_MS = 5000L;
+    private static final long STARTUP_TRANSITION_WINDOW_MS = 15 * 60 * 1000L;
     private static final long RECOVERY_COOLDOWN_MS = 4000L;
     private static final long NETWORK_POLL_INTERVAL_MS = 500L;
     private static final long NETWORK_POLL_WINDOW_MS = 30000L;
@@ -38,8 +43,12 @@ public final class NetworkOptimizationHooks {
 
     private volatile WeakReference<Activity> mainActivity = new WeakReference<>(null);
     private volatile ConnectivityManager connectivityManager;
+    private volatile SharedPreferences networkStatePreferences;
     private volatile Network lastValidatedNetwork;
     private volatile Network currentNetwork;
+    private volatile String currentTransport = "unknown";
+    private volatile String previousPersistedTransport = "unknown";
+    private volatile long previousPersistedTransportAt;
     private volatile boolean waitingForValidatedNetwork;
     private volatile boolean networkWasLost;
     private volatile long lastRecoveryAt;
@@ -72,12 +81,15 @@ public final class NetworkOptimizationHooks {
             }
 
             connectivityManager = manager;
+            networkStatePreferences = context.getSharedPreferences(
+                    NETWORK_STATE_PREFERENCES, Context.MODE_PRIVATE);
             registerActivityCallbacks(context);
             Network initial = manager.getActiveNetwork();
             NetworkCapabilities initialCapabilities = initial == null
                     ? null : manager.getNetworkCapabilities(initial);
+            initializeTransportState(initialCapabilities);
             currentNetwork = initial;
-            waitingForValidatedNetwork = !isValidatedInternet(initialCapabilities);
+            waitingForValidatedNetwork = initial == null;
             lastValidatedNetwork = waitingForValidatedNetwork ? null : initial;
             networkWasLost = initial == null;
 
@@ -202,11 +214,19 @@ public final class NetworkOptimizationHooks {
             Network network, NetworkCapabilities capabilities, String source) {
         boolean validated = isValidatedInternet(capabilities);
         Network previousNetwork = currentNetwork;
+        String previousTransport = currentTransport;
+        String transport = transportName(capabilities);
         boolean switched = previousNetwork != null
                 && network != null
                 && !previousNetwork.equals(network);
-        boolean recovered = validated && (networkWasLost
-                || waitingForValidatedNetwork
+        boolean transportSwitched = validated
+                && isTrackedTransport(previousTransport)
+                && isTrackedTransport(transport)
+                && !previousTransport.equals(transport);
+        boolean recovered = validated
+                && "wifi".equals(transport)
+                && (networkWasLost
+                || transportSwitched
                 || (lastValidatedNetwork != null && !lastValidatedNetwork.equals(network)));
 
         currentNetwork = network;
@@ -219,6 +239,8 @@ public final class NetworkOptimizationHooks {
         }
 
         lastValidatedNetwork = network;
+        currentTransport = transport;
+        rememberTransport(transport);
         waitingForValidatedNetwork = false;
         networkWasLost = false;
         if (recovered) {
@@ -286,18 +308,22 @@ public final class NetworkOptimizationHooks {
     }
 
     /**
-     * Bilibili can start after Android has already selected a validated Wi-Fi network.
-     * In that case no default-network handover callback is emitted, although the app's
-     * own network state can still be transitioning from cellular to Wi-Fi.
+     * Bilibili can start after Android has already selected Wi-Fi. Only treat that as a
+     * recovery when the module recently observed cellular data in an earlier process.
      */
     private void scheduleStartupRecoveryIfNeeded() {
         if (!module.isNetworkOptimizationEnabled()
                 || !startupRecoveryScheduled.compareAndSet(false, true)) {
             return;
         }
+        long now = System.currentTimeMillis();
+        if (!"cellular".equals(previousPersistedTransport)
+                || previousPersistedTransportAt <= 0L
+                || now - previousPersistedTransportAt > STARTUP_TRANSITION_WINDOW_MS) {
+            return;
+        }
         ConnectivityManager manager = connectivityManager;
         if (manager == null) {
-            startupRecoveryScheduled.set(false);
             return;
         }
         Network active;
@@ -306,7 +332,6 @@ public final class NetworkOptimizationHooks {
             active = manager.getActiveNetwork();
             capabilities = getCapabilities(active);
         } catch (Throwable throwable) {
-            startupRecoveryScheduled.set(false);
             module.debug("network optimization startup network check failed: "
                     + throwable.getClass().getSimpleName());
             return;
@@ -314,11 +339,11 @@ public final class NetworkOptimizationHooks {
         if (!isValidatedInternet(capabilities)
                 || capabilities == null
                 || !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-            startupRecoveryScheduled.set(false);
             return;
         }
         module.info("network optimization startup Wi-Fi fallback scheduled: network="
-                + active + "; homepage refresh scheduled in "
+                + active + " previousTransport=" + previousPersistedTransport
+                + "; homepage refresh scheduled in "
                 + STARTUP_RECOVERY_DELAY_MS + "ms");
         mainHandler.postDelayed(() -> {
             try {
@@ -345,6 +370,47 @@ public final class NetworkOptimizationHooks {
                         + throwable.getClass().getSimpleName());
             }
         }, STARTUP_RECOVERY_DELAY_MS);
+    }
+
+    private void initializeTransportState(NetworkCapabilities capabilities) {
+        if (capabilities == null) {
+            return;
+        }
+        String current = transportName(capabilities);
+        currentTransport = current;
+        SharedPreferences preferences = networkStatePreferences;
+        if (preferences == null) {
+            return;
+        }
+        try {
+            previousPersistedTransport = preferences.getString(KEY_LAST_TRANSPORT, "unknown");
+            previousPersistedTransportAt = preferences.getLong(KEY_LAST_TRANSPORT_AT, 0L);
+            rememberTransport(current);
+            module.info("network optimization transport state: previous="
+                    + previousPersistedTransport + " current=" + current);
+        } catch (Throwable throwable) {
+            module.debug("network optimization transport state unavailable: "
+                    + throwable.getClass().getSimpleName());
+        }
+    }
+
+    private void rememberTransport(String transport) {
+        if (!isTrackedTransport(transport)) {
+            return;
+        }
+        SharedPreferences preferences = networkStatePreferences;
+        if (preferences != null) {
+            preferences.edit()
+                    .putString(KEY_LAST_TRANSPORT, transport)
+                    .putLong(KEY_LAST_TRANSPORT_AT, System.currentTimeMillis())
+                    .apply();
+        }
+    }
+
+    private static boolean isTrackedTransport(String transport) {
+        return "wifi".equals(transport)
+                || "cellular".equals(transport)
+                || "vpn".equals(transport);
     }
 
     private void scheduleHomepageRecovery(
