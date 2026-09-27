@@ -23,6 +23,7 @@ import com.xjw.bilifix.in.core.HostApplication;
 import com.xjw.bilifix.in.core.HostVersion;
 import com.xjw.bilifix.in.feature.article.ArticleHooks;
 import com.xjw.bilifix.in.feature.article.DynamicArticleIdentityHooks;
+import com.xjw.bilifix.in.feature.clipboard.ClipboardRulesHooks;
 import com.xjw.bilifix.in.feature.commenttranslation.CommentTranslationHooks;
 import com.xjw.bilifix.in.feature.compat.CompatFeatureHooks;
 import com.xjw.bilifix.in.feature.emoticon.PaidEmoticonHooks;
@@ -95,6 +96,7 @@ public final class BiliFixModule extends XposedModule implements HookApi {
         installApplicationSettingsHook(classLoader);
         if (mainProcess) {
             new NetworkOptimizationHooks(this).install();
+            new ClipboardRulesHooks(this, classLoader).install();
         }
         new WebViewThemeHooks(this, classLoader).install();
         new CompatFeatureHooks(this, classLoader).install();

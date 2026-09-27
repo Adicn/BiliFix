@@ -8,6 +8,7 @@ import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -16,6 +17,9 @@ import com.xjw.bilifix.in.core.HookApi;
 import com.xjw.bilifix.in.core.HostApplication;
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Recovers the homepage after a validated network handover or startup transition. */
@@ -25,9 +29,11 @@ public final class NetworkOptimizationHooks {
     private static final String NETWORK_STATE_PREFERENCES = "bilifix_in_network_state";
     private static final String KEY_LAST_TRANSPORT = "last_transport";
     private static final String KEY_LAST_TRANSPORT_AT = "last_transport_at";
+    private static final String KEY_LAST_APP_ACTIVE_AT = "last_app_active_at";
     private static final long NETWORK_RECOVERY_DELAY_MS = 750L;
-    private static final long STARTUP_RECOVERY_DELAY_MS = 5000L;
+    private static final long STARTUP_RECOVERY_DELAY_MS = 750L;
     private static final long STARTUP_TRANSITION_WINDOW_MS = 15 * 60 * 1000L;
+    private static final long LONG_IDLE_RECOVERY_THRESHOLD_MS = 6 * 60 * 60 * 1000L;
     private static final long RECOVERY_COOLDOWN_MS = 4000L;
     private static final long NETWORK_POLL_INTERVAL_MS = 500L;
     private static final long NETWORK_POLL_WINDOW_MS = 30000L;
@@ -49,6 +55,8 @@ public final class NetworkOptimizationHooks {
     private volatile String currentTransport = "unknown";
     private volatile String previousPersistedTransport = "unknown";
     private volatile long previousPersistedTransportAt;
+    private volatile long previousAppActiveAt;
+    private volatile boolean longIdleRecoveryEligible;
     private volatile boolean waitingForValidatedNetwork;
     private volatile boolean networkWasLost;
     private volatile long lastRecoveryAt;
@@ -83,6 +91,7 @@ public final class NetworkOptimizationHooks {
             connectivityManager = manager;
             networkStatePreferences = context.getSharedPreferences(
                     NETWORK_STATE_PREFERENCES, Context.MODE_PRIVATE);
+            initializeAppActivityState();
             registerActivityCallbacks(context);
             Network initial = manager.getActiveNetwork();
             NetworkCapabilities initialCapabilities = initial == null
@@ -99,6 +108,12 @@ public final class NetworkOptimizationHooks {
                     + " initialNetwork=" + initial
                     + " initialValidated=" + !waitingForValidatedNetwork);
             startNetworkPolling();
+            // Registration can happen after MainActivityV2 has already resumed. In that
+            // case the lifecycle callback will not fire again until a later restart.
+            mainHandler.post(() -> {
+                scheduleStartupRecoveryIfNeeded();
+                rememberAppActivity();
+            });
         } catch (Throwable throwable) {
             module.warn("network optimization network callback unavailable: "
                     + throwable.getClass().getSimpleName());
@@ -141,6 +156,8 @@ public final class NetworkOptimizationHooks {
                 public void onActivityStarted(Activity activity) {
                     if (isMainActivity(activity)) {
                         mainActivity = new WeakReference<>(activity);
+                        scheduleStartupRecoveryIfNeeded();
+                        rememberAppActivity();
                         startNetworkPolling();
                     }
                 }
@@ -150,6 +167,7 @@ public final class NetworkOptimizationHooks {
                     if (isMainActivity(activity)) {
                         mainActivity = new WeakReference<>(activity);
                         scheduleStartupRecoveryIfNeeded();
+                        rememberAppActivity();
                         refreshPendingActivity(activity);
                         startNetworkPolling();
                     }
@@ -243,6 +261,9 @@ public final class NetworkOptimizationHooks {
         rememberTransport(transport);
         waitingForValidatedNetwork = false;
         networkWasLost = false;
+        if ("wifi".equals(transport)) {
+            scheduleStartupRecoveryIfNeeded();
+        }
         if (recovered) {
             module.info("network optimization validated network observed: source=" + source
                     + " network=" + network
@@ -302,9 +323,13 @@ public final class NetworkOptimizationHooks {
     }
 
     private static boolean isValidatedInternet(NetworkCapabilities capabilities) {
-        return capabilities != null
-                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+        if (capabilities == null
+                || !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                || !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+            return false;
+        }
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.P
+                || capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED);
     }
 
     /**
@@ -312,14 +337,21 @@ public final class NetworkOptimizationHooks {
      * recovery when the module recently observed cellular data in an earlier process.
      */
     private void scheduleStartupRecoveryIfNeeded() {
-        if (!module.isNetworkOptimizationEnabled()
-                || !startupRecoveryScheduled.compareAndSet(false, true)) {
+        if (!module.isNetworkOptimizationEnabled() || startupRecoveryScheduled.get()) {
             return;
         }
         long now = System.currentTimeMillis();
-        if (!"cellular".equals(previousPersistedTransport)
-                || previousPersistedTransportAt <= 0L
-                || now - previousPersistedTransportAt > STARTUP_TRANSITION_WINDOW_MS) {
+        boolean recentCellularTransition = "cellular".equals(previousPersistedTransport)
+                && previousPersistedTransportAt > 0L
+                && now >= previousPersistedTransportAt
+                && now - previousPersistedTransportAt <= STARTUP_TRANSITION_WINDOW_MS;
+        boolean longIdle = previousAppActiveAt > 0L
+                && now >= previousAppActiveAt
+                && now - previousAppActiveAt >= LONG_IDLE_RECOVERY_THRESHOLD_MS;
+        if (longIdle) {
+            longIdleRecoveryEligible = true;
+        }
+        if (!recentCellularTransition && !longIdleRecoveryEligible) {
             return;
         }
         ConnectivityManager manager = connectivityManager;
@@ -341,8 +373,16 @@ public final class NetworkOptimizationHooks {
                 || !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
             return;
         }
+        if (!startupRecoveryScheduled.compareAndSet(false, true)) {
+            return;
+        }
+        String reason = recentCellularTransition ? "cellular-to-wifi" : "long-idle";
+        long idleDuration = longIdleRecoveryEligible && previousAppActiveAt > 0L
+                ? Math.max(0L, now - previousAppActiveAt) : 0L;
         module.info("network optimization startup Wi-Fi fallback scheduled: network="
                 + active + " previousTransport=" + previousPersistedTransport
+                + " reason=" + reason
+                + " idleMs=" + idleDuration
                 + "; homepage refresh scheduled in "
                 + STARTUP_RECOVERY_DELAY_MS + "ms");
         mainHandler.postDelayed(() -> {
@@ -361,9 +401,12 @@ public final class NetworkOptimizationHooks {
                     return;
                 }
                 refreshPending.set(true);
-                Activity activity = mainActivity.get();
+                Activity activity = getMainActivity();
                 if (activity != null) {
                     refreshPendingActivity(activity);
+                } else {
+                    module.warn("network optimization startup fallback pending: "
+                            + "MainActivityV2 is not available yet");
                 }
             } catch (Throwable throwable) {
                 module.warn("network optimization startup Wi-Fi fallback failed: "
@@ -373,11 +416,6 @@ public final class NetworkOptimizationHooks {
     }
 
     private void initializeTransportState(NetworkCapabilities capabilities) {
-        if (capabilities == null) {
-            return;
-        }
-        String current = transportName(capabilities);
-        currentTransport = current;
         SharedPreferences preferences = networkStatePreferences;
         if (preferences == null) {
             return;
@@ -385,12 +423,35 @@ public final class NetworkOptimizationHooks {
         try {
             previousPersistedTransport = preferences.getString(KEY_LAST_TRANSPORT, "unknown");
             previousPersistedTransportAt = preferences.getLong(KEY_LAST_TRANSPORT_AT, 0L);
+            if (capabilities == null) {
+                module.info("network optimization transport state: previous="
+                        + previousPersistedTransport + " current=unknown");
+                return;
+            }
+            String current = transportName(capabilities);
+            currentTransport = current;
             rememberTransport(current);
             module.info("network optimization transport state: previous="
                     + previousPersistedTransport + " current=" + current);
         } catch (Throwable throwable) {
             module.debug("network optimization transport state unavailable: "
                     + throwable.getClass().getSimpleName());
+        }
+    }
+
+    private void initializeAppActivityState() {
+        SharedPreferences preferences = networkStatePreferences;
+        if (preferences != null) {
+            previousAppActiveAt = preferences.getLong(KEY_LAST_APP_ACTIVE_AT, 0L);
+        }
+    }
+
+    private void rememberAppActivity() {
+        long now = System.currentTimeMillis();
+        previousAppActiveAt = now;
+        SharedPreferences preferences = networkStatePreferences;
+        if (preferences != null) {
+            preferences.edit().putLong(KEY_LAST_APP_ACTIVE_AT, now).apply();
         }
     }
 
@@ -434,11 +495,72 @@ public final class NetworkOptimizationHooks {
                 return;
             }
             refreshPending.set(true);
-            Activity activity = mainActivity.get();
+            Activity activity = getMainActivity();
             if (activity != null) {
                 refreshPendingActivity(activity);
             }
         }, NETWORK_RECOVERY_DELAY_MS);
+    }
+
+    private Activity getMainActivity() {
+        Activity activity = mainActivity.get();
+        if (isUsableMainActivity(activity)) {
+            return activity;
+        }
+        Activity resumedActivity = findResumedMainActivity();
+        if (resumedActivity != null) {
+            mainActivity = new WeakReference<>(resumedActivity);
+        }
+        return resumedActivity;
+    }
+
+    private static boolean isUsableMainActivity(Activity activity) {
+        return isMainActivity(activity)
+                && !activity.isFinishing()
+                && !activity.isDestroyed();
+    }
+
+    /**
+     * The lifecycle listener may be registered after the main activity resumed. Use the
+     * process activity records only as a fallback for that narrow recovery path.
+     */
+    private Activity findResumedMainActivity() {
+        try {
+            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+            Method currentThread = activityThreadClass.getDeclaredMethod(
+                    "currentActivityThread");
+            currentThread.setAccessible(true);
+            Object thread = currentThread.invoke(null);
+            if (thread == null) {
+                return null;
+            }
+            Field activitiesField = activityThreadClass.getDeclaredField("mActivities");
+            activitiesField.setAccessible(true);
+            Object activities = activitiesField.get(thread);
+            if (!(activities instanceof Map)) {
+                return null;
+            }
+            for (Object record : ((Map<?, ?>) activities).values()) {
+                if (record == null) {
+                    continue;
+                }
+                Field activityField = record.getClass().getDeclaredField("activity");
+                Field pausedField = record.getClass().getDeclaredField("paused");
+                activityField.setAccessible(true);
+                pausedField.setAccessible(true);
+                Object candidate = activityField.get(record);
+                Object paused = pausedField.get(record);
+                if (candidate instanceof Activity
+                        && Boolean.FALSE.equals(paused)
+                        && isUsableMainActivity((Activity) candidate)) {
+                    return (Activity) candidate;
+                }
+            }
+        } catch (Throwable throwable) {
+            module.debug("network optimization current activity lookup failed: "
+                    + throwable.getClass().getSimpleName());
+        }
+        return null;
     }
 
     private void refreshPendingActivity(Activity activity) {
