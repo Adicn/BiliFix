@@ -210,8 +210,10 @@ public final class NetworkOptimizationHooks {
             new ConnectivityManager.NetworkCallback() {
                 @Override
                 public void onAvailable(Network network) {
-                    module.info("network optimization network available: " + network);
-                    observeNetwork(network, getCapabilities(network), "callback-available");
+                    NetworkCapabilities capabilities = getCapabilities(network);
+                    module.info("network optimization network available: " + network
+                            + " capabilities=" + capabilities);
+                    observeNetwork(network, capabilities, "callback-available");
                     startNetworkPolling();
                 }
 
@@ -328,13 +330,9 @@ public final class NetworkOptimizationHooks {
     }
 
     private static boolean isValidatedInternet(NetworkCapabilities capabilities) {
-        if (capabilities == null
-                || !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                || !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-            return false;
-        }
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.P
-                || capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED);
+        return capabilities != null
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
     }
 
     /**
