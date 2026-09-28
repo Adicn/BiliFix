@@ -2,8 +2,11 @@ package com.xjw.bilifix.in.feature.network;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlarmManager;
 import android.app.Application;
+import android.app.PendingIntent;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.Network;
@@ -32,6 +35,7 @@ public final class NetworkOptimizationHooks {
     private static final String KEY_LAST_APP_ACTIVE_AT = "last_app_active_at";
     private static final long NETWORK_RECOVERY_DELAY_MS = 750L;
     private static final long STARTUP_RECOVERY_DELAY_MS = 750L;
+    private static final long HOST_RESTART_DELAY_MS = 250L;
     private static final long STARTUP_TRANSITION_WINDOW_MS = 15 * 60 * 1000L;
     private static final long LONG_IDLE_RECOVERY_THRESHOLD_MS = 6 * 60 * 60 * 1000L;
     private static final long RECOVERY_COOLDOWN_MS = 4000L;
@@ -46,6 +50,7 @@ public final class NetworkOptimizationHooks {
     private final AtomicBoolean refreshPending = new AtomicBoolean(false);
     private final AtomicBoolean networkPolling = new AtomicBoolean(false);
     private final AtomicBoolean startupRecoveryScheduled = new AtomicBoolean(false);
+    private final AtomicBoolean hostRestartScheduled = new AtomicBoolean(false);
 
     private volatile WeakReference<Activity> mainActivity = new WeakReference<>(null);
     private volatile ConnectivityManager connectivityManager;
@@ -575,10 +580,53 @@ public final class NetworkOptimizationHooks {
         }
         module.info("network optimization refreshing homepage after network recovery");
         mainHandler.post(() -> {
-            if (!activity.isFinishing() && !activity.isDestroyed()) {
-                activity.recreate();
+            if (isUsableMainActivity(activity)) {
+                restartHostProcess(activity);
             }
         });
+    }
+
+    /**
+     * Activity recreation leaves Bilibili's process-wide Cronet engine and old requests alive.
+     * Schedule the launcher before exiting so the next process starts with a clean network
+     * engine. This path is only reached after a validated network recovery was detected.
+     */
+    private void restartHostProcess(Activity activity) {
+        if (!hostRestartScheduled.compareAndSet(false, true)) {
+            return;
+        }
+        Context context = activity.getApplicationContext();
+        Intent launchIntent = context.getPackageManager()
+                .getLaunchIntentForPackage(context.getPackageName());
+        AlarmManager alarmManager = (AlarmManager) context.getSystemService(
+                Context.ALARM_SERVICE);
+        if (launchIntent == null || alarmManager == null) {
+            hostRestartScheduled.set(false);
+            module.warn("network optimization host restart unavailable; falling back to activity "
+                    + "recreate");
+            activity.recreate();
+            return;
+        }
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        int pendingIntentFlags = PendingIntent.FLAG_CANCEL_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            pendingIntentFlags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        PendingIntent restartIntent = PendingIntent.getActivity(
+                context, 0, launchIntent, pendingIntentFlags);
+        alarmManager.set(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                SystemClock.elapsedRealtime() + HOST_RESTART_DELAY_MS,
+                restartIntent);
+        module.info("network optimization host process restart scheduled in "
+                + HOST_RESTART_DELAY_MS + "ms to clear stale network requests");
+        try {
+            activity.finishAndRemoveTask();
+        } finally {
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
     }
 
     private static String transportName(NetworkCapabilities capabilities) {
