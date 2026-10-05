@@ -3,6 +3,7 @@ package com.xjw.bilifix.in;
 import static com.xjw.bilifix.in.core.ModuleConstants.TARGET_PACKAGE;
 import static com.xjw.bilifix.in.core.ModuleConstants.WEB_PROCESS;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
@@ -44,6 +45,7 @@ public final class BiliFixModule extends XposedModule implements HookApi {
     private final List<XposedInterface.HookHandle> hookHandles = new ArrayList<>();
     private volatile Handler mainHandler;
     private volatile SystemShareHooks systemShareHooks;
+    private volatile NetworkOptimizationHooks networkOptimizationHooks;
     private volatile HostVersion hostVersion;
 
     private volatile String processName = "unknown";
@@ -61,10 +63,35 @@ public final class BiliFixModule extends XposedModule implements HookApi {
     }
 
     @Override
+    @SuppressLint("NewApi")
+    public void onPackageLoaded(PackageLoadedParam param) {
+        if (!TARGET_PACKAGE.equals(param.getPackageName())) {
+            return;
+        }
+        info("package loaded callback: process=" + processName);
+        if (!TARGET_PACKAGE.equals(processName)) {
+            return;
+        }
+        NetworkOptimizationHooks hooks = networkOptimizationHooks;
+        if (hooks == null) {
+            synchronized (this) {
+                hooks = networkOptimizationHooks;
+                if (hooks == null) {
+                    hooks = new NetworkOptimizationHooks(this, param.getDefaultClassLoader());
+                    networkOptimizationHooks = hooks;
+                }
+            }
+        }
+        hooks.install();
+        info("network optimization requested at package-loaded, before application startup");
+    }
+
+    @Override
     public void onPackageReady(PackageReadyParam param) {
         if (!TARGET_PACKAGE.equals(param.getPackageName())) {
             return;
         }
+        info("package ready callback: process=" + processName);
         boolean mainProcess = TARGET_PACKAGE.equals(processName);
         boolean webProcess = WEB_PROCESS.equals(processName);
         if (!mainProcess && !webProcess) {
@@ -95,7 +122,14 @@ public final class BiliFixModule extends XposedModule implements HookApi {
 
         installApplicationSettingsHook(classLoader);
         if (mainProcess) {
-            new NetworkOptimizationHooks(this).install();
+            NetworkOptimizationHooks networkHooks = networkOptimizationHooks;
+            if (networkHooks == null) {
+                networkHooks = new NetworkOptimizationHooks(this, classLoader);
+                networkOptimizationHooks = networkHooks;
+            }
+            // Keep a fallback for frameworks that omit onPackageLoaded. The hook class itself
+            // is idempotent, so this does not install a second Application.onCreate hook.
+            networkHooks.install();
             new ClipboardRulesHooks(this, classLoader).install();
         }
         new WebViewThemeHooks(this, classLoader).install();
