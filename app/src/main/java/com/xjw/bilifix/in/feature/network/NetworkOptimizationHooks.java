@@ -15,6 +15,7 @@ import com.xjw.bilifix.in.core.HookApi;
 import com.xjw.bilifix.in.core.HostApplication;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -28,6 +29,9 @@ public final class NetworkOptimizationHooks {
     private static final long STARTUP_NETWORK_SETTLE_MS = 250L;
     private static final long STARTUP_NETWORK_BIND_HOLD_MS = 12000L;
     private static final long VISIBLE_STARTUP_MIN_INTERVAL_MS = 15000L;
+    private static final String REACHABILITY_PROBE_PREFIX = "https://dns.google/";
+    private static final String REACHABILITY_PROBE_HTTP_PREFIX = "http://dns.google/";
+    private static final String REACHABILITY_PROBE_FALLBACK_URL = "https://app.bilibili.com/";
 
     private final HookApi module;
     private final ClassLoader classLoader;
@@ -35,6 +39,8 @@ public final class NetworkOptimizationHooks {
     private final AtomicBoolean initializationComplete = new AtomicBoolean(false);
     private final AtomicBoolean applicationHookInstalled = new AtomicBoolean(false);
     private final AtomicBoolean mainActivityHookInstalled = new AtomicBoolean(false);
+    private final AtomicBoolean reachabilityProbeHookInstalled = new AtomicBoolean(false);
+    private final AtomicBoolean reachabilityProbeRedirectLogged = new AtomicBoolean(false);
     private final AtomicBoolean startupCheckCompleted = new AtomicBoolean(false);
     private final AtomicBoolean visibleRecoveryScheduled = new AtomicBoolean(false);
 
@@ -55,12 +61,68 @@ public final class NetworkOptimizationHooks {
                     + throwable.getClass().getSimpleName());
         }
         try {
+            installReachabilityProbeHook();
+        } catch (Throwable throwable) {
+            module.warn("network optimization reachability probe hook unavailable: "
+                    + throwable.getClass().getSimpleName());
+        }
+        try {
             installMainActivityStartHook();
         } catch (Throwable throwable) {
             module.warn("network optimization main activity hook unavailable: "
                     + throwable.getClass().getSimpleName());
         }
         initializeStartupCheck(0);
+    }
+
+    /**
+     * Bilibili uses dns.google as a connectivity probe, not as its DNS resolver. On networks
+     * where Google is unreachable, that probe can consume its full timeout before the feed
+     * request is allowed to proceed. Keep the probe semantics but send it to the Bilibili entry
+     * host, whose reachability is relevant to the actual feed request.
+     */
+    private void installReachabilityProbeHook() throws Throwable {
+        if (reachabilityProbeHookInstalled.get()) {
+            return;
+        }
+        Class<?> httpUrlClass = module.load(classLoader, "okhttp3.t");
+        Method parseUrl = module.declaredMethod(httpUrlClass, "l", String.class);
+        if (!Modifier.isStatic(parseUrl.getModifiers())) {
+            throw new NoSuchMethodException("okhttp3.t.l(String) is not static");
+        }
+        if (!reachabilityProbeHookInstalled.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            module.addHook("Bilibili connectivity probe URL", parseUrl, hookChain -> {
+                if (!module.isNetworkOptimizationEnabled()) {
+                    return hookChain.proceed();
+                }
+                Object[] args = hookChain.getArgs().toArray();
+                if (args.length == 1 && isReachabilityProbe(args[0])) {
+                    args[0] = REACHABILITY_PROBE_FALLBACK_URL;
+                    if (reachabilityProbeRedirectLogged.compareAndSet(false, true)) {
+                        module.info("network optimization redirected dns.google connectivity probe"
+                                + " to " + REACHABILITY_PROBE_FALLBACK_URL);
+                    }
+                    return hookChain.proceed(args);
+                }
+                return hookChain.proceed();
+            });
+            module.info("network optimization connectivity probe hook installed");
+        } catch (Throwable throwable) {
+            reachabilityProbeHookInstalled.set(false);
+            throw throwable;
+        }
+    }
+
+    private static boolean isReachabilityProbe(Object value) {
+        if (!(value instanceof String)) {
+            return false;
+        }
+        String url = (String) value;
+        return url.startsWith(REACHABILITY_PROBE_PREFIX)
+                || url.startsWith(REACHABILITY_PROBE_HTTP_PREFIX);
     }
 
     private void initializeStartupCheck(int attempt) {
@@ -241,14 +303,42 @@ public final class NetworkOptimizationHooks {
             return null;
         }
 
-        Network boundNetwork = bindProcessToActiveNetwork();
-        module.info("network optimization visible pass"
-                + " boundNetwork=" + boundNetwork
-                + "; MainActivityV2.onStart continues");
-        if (boundNetwork == null) {
+        ConnectivityManager manager = connectivityManager;
+        Network activeNetwork = manager == null ? null : manager.getActiveNetwork();
+        if (!isValidatedInternet(getCapabilities(activeNetwork))) {
+            module.info("network optimization visible pass found no validated active network"
+                    + "; MainActivityV2.onStart continues");
             scheduleVisibleNetworkRecovery();
+            return null;
         }
-        return boundNetwork;
+
+        // A validated default network is already the route Cronet will select. Binding it again
+        // on every Activity start can invalidate/recreate connections and cause a visible refresh
+        // even when the feed request is healthy. Only repair a binding that this process already
+        // holds for a different network.
+        Network currentBinding = null;
+        try {
+            if (manager != null) {
+                currentBinding = manager.getBoundNetworkForProcess();
+            }
+        } catch (Throwable throwable) {
+            module.debug("network optimization visible binding state unavailable: "
+                    + throwable.getClass().getSimpleName());
+        }
+        if (currentBinding == null || currentBinding.equals(activeNetwork)) {
+            module.info("network optimization visible pass skipped process binding"
+                    + " activeNetwork=" + activeNetwork
+                    + " currentBinding=" + currentBinding
+                    + "; validated network already available");
+            return null;
+        }
+
+        Network reboundNetwork = bindProcessToActiveNetwork();
+        module.info("network optimization visible pass repaired stale process binding"
+                + " previousBinding=" + currentBinding
+                + " boundNetwork=" + reboundNetwork
+                + "; MainActivityV2.onStart continues");
+        return reboundNetwork;
     }
 
     private boolean claimPreparationSlot() {
